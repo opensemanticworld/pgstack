@@ -13,3 +13,25 @@ classDiagram
     PostgresDB  <|-- PgAdminUI : configurates
     PythonClient --|> PostrestAPI : connects to
 ```
+
+PythonClient: https://git.hte.group/hierndatabase/hiern-database-pgstack-pyclient
+
+## Config
+
+```bash
+cp .env.example .env
+```
+Set ENV values in `.env`
+
+## Usage
+
+```bash
+docker compose up
+```
+
+## Cleanup
+
+```bash
+docker compose down -v
+sudo rm -r postgres/data && sudo rm -r pgadmin/data
+```

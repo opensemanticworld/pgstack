@@ -59,8 +59,7 @@ services:
       PGRST_DB_ANON_ROLE: api_anon
       PGRST_OPENAPI_SECURITY_ACTIVE: true
       PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
-      # !Todo: Keycloak/Auth0 authentication
-      # PGRST_ROLE_CLAIM_KEY: ${PGRST_ROLE_CLAIM_KEY}
+      PGRST_ROLE_CLAIM_KEY: ${PGRST_ROLE_CLAIM_KEY}
       # PGRST_DB_PRE_REQUEST: ${PGRST_DB_PRE_REQUEST}
     restart: unless-stopped
     depends_on:
@@ -78,6 +77,43 @@ services:
     restart: unless-stopped
     depends_on:
       - postgrest
+
+  keycloak-db:
+      image: postgres
+      volumes:
+        - ./keycloak/data/db:/var/lib/postgresql/data
+      environment:
+        - POSTGRES_DB=keycloak
+        - POSTGRES_USER=keycloak
+        - POSTGRES_PASSWORD=${KEYCLOAK_DB_PASSWORD}
+
+  keycloak:
+      image: quay.io/keycloak/keycloak
+      command:
+        - start
+      environment:
+        #see https://www.keycloak.org/server/all-config
+        #DB params are optional. If not set, internal h2 DB is used
+        - KC_DB=postgres
+        - KC_DB_URL_HOST=keycloak-db
+        - KC_DB_URL_PORT=5432
+        - KC_DB_URL_DATABASE=keycloak
+        - KC_DB_USERNAME=keycloak
+        - KC_DB_SCHEMA=public
+        - KC_DB_PASSWORD=${KEYCLOAK_DB_PASSWORD}
+        - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-admin}
+        - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
+        - KC_HOSTNAME_URL=${KEYCLOAK_SERVER}
+        - KC_HTTP_ENABLED=true
+        # see https://github.com/keycloak/keycloak/issues/14586
+        - KC_HOSTNAME_STRICT=false
+        - KC_PROXY=edge
+        - PROXY_ADDRESS_FORWARDING=true
+        #- KC_HTTP_RELATIVE_PATH: /auth
+      #ports:
+      #  - 8080:8080
+      depends_on:
+        - keycloak-db
 
 # see: https://docs.docker.com/compose/compose-file/08-configs/
 configs:

@@ -9,13 +9,17 @@ ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 -- Create user roles
 CREATE ROLE api_user nologin;
 CREATE ROLE api_anon nologin;
+CREATE ROLE api_admin nologin;
 
 -- Set permissions
 GRANT api_anon TO authenticator;
 GRANT api_user TO authenticator;
+GRANT api_admin TO authenticator;
 GRANT USAGE ON SCHEMA api TO api_anon;
 GRANT ALL ON SCHEMA api TO api_user;
+GRANT ALL ON SCHEMA api TO api_admin;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA api TO api_user;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA api TO api_admin;
 
 -- create event trigger function (automatic schema cache reloading)
 CREATE OR REPLACE FUNCTION api.pgrst_watch()

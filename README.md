@@ -20,6 +20,32 @@ classDiagram
 
 PythonClient: https://git.hte.group/hierndatabase/hiern-database-pgstack-pyclient
 
+As reverse proxy, caddy is recommended. To use it, create the following docker compose within the same or a separate stack:
+```yml
+services:
+  caddy:
+    environment:
+    - CADDY_INGRESS_NETWORKS=caddy
+    image: lucaslorentz/caddy-docker-proxy:ci-alpine
+    networks:
+    - caddy
+    ports:
+    - 80:80
+    - 443:443
+    restart: unless-stopped
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    - caddy_data:/data
+
+volumes:
+  caddy_data: {}
+networks:
+  caddy:
+    external: true
+``` 
+
+In `docker-compose.example.override.yml` you can find the necessary definitions to expose the different containers via caddy.
+
 ## Config
 
 ```bash
@@ -38,6 +64,8 @@ docker compose up
 ```bash
 docker compose down -v
 sudo rm -r postgres/data && sudo rm -r pgadmin/data
+sudo mkdir pgadmin/data && sudo chown -R 5050:5050 pgadmin/data
+mkdir pgadmin/config
 ```
 
 ## Auth
@@ -119,3 +147,13 @@ curl  -X POST \
 ```
 
 Optionally you can provide a minimal login page to allow users to request a token by replace to placeholders in `keycloak/config/login-page/index.template.html` and provide it via webserver at the configured redirect url.
+
+If you use Caddy, you can configure the caddy docker-compose.yml as follows:
+```yml
+    # custom static files
+    - <your_path>/keycloak/config/login-page:/var/www/html/login-page
+    labels:
+      caddy: <CLIENT_REDIRECT_URL>
+      caddy.file_server: /*
+      caddy.file_server.root: "/var/www/html/login-page"
+```

@@ -1,0 +1,35 @@
+<head>
+    <!-- insert the envvars KEYCLOAK_SERVER url here as well as the settings CLIENT_ID and CLIENT_REDIRECT_URL -->
+    <script src="https://<KEYCLOAK_SERVER>/js/keycloak.js"></script>
+    <script>
+        async function login() {
+            const keycloak = new Keycloak({
+                url: 'https://<KEYCLOAK_SERVER>',
+                realm: 'master',
+                clientId: '<CLIENT_ID>',
+            });
+
+            try {
+                const authenticated = await keycloak.init({
+                    // must match to the configured value in keycloak
+                    redirectUri: '<CLIENT_REDIRECT_URL>',
+                    checkLoginIframe: false, // Hidden Session Status iframe fails for some browsers
+                    flow: 'implicit',
+                    onLoad: 'login-required',
+                });
+                console.log(`User is ${authenticated ? 'authenticated' : 'not authenticated'}`);
+                if (authenticated) {
+                    console.log(`Bearer ${keycloak.token}`)
+                    document.getElementById("token").innerHTML=`Bearer ${keycloak.token}`;
+                }
+            } catch (error) {
+                console.error('Failed to initialize adapter:', error);
+            }
+        }
+        login();
+    </script>
+</head>
+<body>
+    <label for="token">Your Token</label>
+    <textarea id="token" style="width: 100%; height: 300px;"></textarea>
+</body>

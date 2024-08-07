@@ -5,6 +5,7 @@ Docker-Compose stack consisting of:
 - [PostgREST](https://postgrest.org/)
 - [SwaggerUI](https://swagger.io/tools/swagger-ui/)
 - [pgAdmin](https://www.pgadmin.org/)
+- [Keycloak](https://www.keycloak.org/)
 
 ```mermaid
 classDiagram
@@ -12,6 +13,9 @@ classDiagram
     PostrestAPI --|> SwaggerUI : generates
     PostgresDB  <|-- PgAdminUI : configurates
     PythonClient --|> PostrestAPI : connects to
+    PythonClient <|-- Keycloak : provides token
+    Keycloak <|-- PostrestAPI : validates token
+    SQLClient --|> PostgresDB : connects to
 ```
 
 PythonClient: https://git.hte.group/hierndatabase/hiern-database-pgstack-pyclient
@@ -81,7 +85,7 @@ PGRST_ROLE_CLAIM_KEY='.resource_access.postgrest.roles[0]'
 ### Client
 
 Go to "clients" and create a new one with name `postgrest`.
-Choose access type "public", and define the redirecturi to `https://login.<domain>` for now.
+Choose access type "public", and define the redirecturi e.g. to `https://login.<domain>` for now.
 
 Set the following settings:
 ```
@@ -105,7 +109,7 @@ Generated access token: see clients/postgrest/client_scopes/evaluate with testus
 
 ```bash
 curl  -X POST \
-  'https://auth.pv.demo.open-semantic-lab.org/realms/master/protocol/openid-connect/token' \
+  'https://<KEYCLOAK_SERVER>/realms/master/protocol/openid-connect/token' \
   --header 'Accept: */*' \
   --header 'Content-Type: application/x-www-form-urlencoded' \
   --data-urlencode 'grant_type=password' \
@@ -113,3 +117,5 @@ curl  -X POST \
   --data-urlencode 'username=testuser' \
   --data-urlencode 'password=testpassword'
 ```
+
+Optionally you can provide a minimal login page to allow users to request a token by replace to placeholders in `keycloak/config/login-page/index.template.html` and provide it via webserver at the configured redirect url.

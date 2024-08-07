@@ -32,6 +32,14 @@ services:
       caddy.1_handle_path: /docs/*
       caddy.1_handle_path.reverse_proxy: "{{upstreams 8080}}"
 
+  keycloak:
+    networks:
+      - caddy
+      - default
+    labels:
+      caddy: ${KEYCLOAK_SERVER}
+      caddy.reverse_proxy: "{{upstreams 8080}}"
+
 networks:
   # Add caddy as an external network.
   caddy:

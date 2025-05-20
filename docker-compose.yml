@@ -10,6 +10,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      # https://github.com/docker-library/postgres/discussions/1158
+      # POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     volumes:
       - ./postgres/data:/var/lib/postgresql/data
       - ./postgres/config/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
@@ -58,6 +60,7 @@ services:
       PGRST_DB_SCHEMAS: api
       PGRST_DB_ANON_ROLE: api_anon
       PGRST_OPENAPI_SECURITY_ACTIVE: true
+      #PGRST_DB_ROOT_SPEC: root
       PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
       PGRST_ROLE_CLAIM_KEY: ${PGRST_ROLE_CLAIM_KEY}
       # PGRST_DB_PRE_REQUEST: ${PGRST_DB_PRE_REQUEST}

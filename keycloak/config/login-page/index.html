@@ -1,0 +1,37 @@
+<head>
+    <!--<script src="../js/keycloak.js"></script>-->
+    <script src="https://auth.pv.demo.open-semantic-lab.org/js/keycloak.js"></script>
+    <script>
+        async function login() {
+            const keycloak = new Keycloak({
+                url: 'https://auth.pv.demo.open-semantic-lab.org',
+                realm: 'master',
+                clientId: 'postgrest',
+            });
+
+            try {
+                const authenticated = await keycloak.init({
+                    //pkceMethod: 'S256',
+                    // must match to the configured value in keycloak
+                    redirectUri: 'https://login.pv.demo.open-semantic-lab.org/',
+                    // this will solved the error 
+                    checkLoginIframe: false, // Hidden Session Status iframe fails for some browsers
+                    flow: 'implicit',
+                    onLoad: 'login-required',
+                });
+                console.log(`User is ${authenticated ? 'authenticated' : 'not authenticated'}`);
+                if (authenticated) {
+                    console.log(`Bearer ${keycloak.token}`)
+                    document.getElementById("token").innerHTML=`Bearer ${keycloak.token}`;
+                }
+            } catch (error) {
+                console.error('Failed to initialize adapter:', error);
+            }
+        }
+        login();
+    </script>
+</head>
+<body>
+    <label for="token">Your Token</label>
+    <textarea id="token" style="width: 100%; height: 300px;"></textarea>
+</body>

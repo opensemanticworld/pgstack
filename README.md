@@ -156,3 +156,33 @@ If you use Caddy, you can configure the caddy docker-compose.yml as follows:
       caddy.file_server: /*
       caddy.file_server.root: "/var/www/html/login-page"
 ```
+
+## Deploy
+
+```bash
+sudo chown 1000:1000 ./postgres/data
+docker compose up
+```
+
+## Maintenance
+
+### Reset
+
+```bash
+docker compose down -v
+sudo rm -R postgres/data/*
+```
+
+### Backup
+
+```bash
+cd <path-to-tsdb-docker-compose-filder>
+mkdir backup
+docker compose exec postgres /bin/bash -c 'pg_dump -U postgres -F p postgres 2>/dev/null | gzip | base64 -w 0' | base64 -d > backup/backup_$(date +"%Y%m%d_%H%M%S").sql.gz
+```
+
+### Restore
+```bash
+cd <path-to-tsdb-docker-compose-filder>
+zcat backup/db_backup_<date>.sql.gz | docker exec -i <container_name> psql -U postgres -d postgres
+```

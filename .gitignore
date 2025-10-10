@@ -1,4 +1,6 @@
 .env
 docker-compose.override.yml
 pgadmin/data
+postgres/data/*
 postgres/config/docker-entrypoint-initdb.d/005_init_users.sql
+backup/*

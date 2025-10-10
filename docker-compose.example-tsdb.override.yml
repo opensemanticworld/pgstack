@@ -1,0 +1,14 @@
+services:
+
+  postgres:
+    image: timescale/timescaledb-ha:pg16.6-ts2.18.0-oss # ha (high availability)
+    environment:
+      TIMESCALEDB_TELEMETRY: off
+    volumes:
+      # tsdb has a different data dir. Make sure to `chown 1000:1000 ./postgres/data`
+      - ./postgres/data:/home/postgres/pgdata/data
+      # Init the tsdb tables and functions
+      - ./postgres/config/optional/100_init_tsdb_schema.sql:/docker-entrypoint-initdb.d/100_init_tsdb_schema.sql
+      # skip the timescaledb toolkit installation - Fixes ERROR:  extension "timescaledb_toolkit" is not available
+      - ./postgres/config/optional/empty:/docker-entrypoint-initdb.d/010_install_timescaledb_toolkit.sh
+

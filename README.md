@@ -1,4 +1,4 @@
-# HI ERN Database Postgres-Stack
+# Timescale-DB Postgres-Stack
 
 Docker-Compose stack consisting of:
 - [PostgreSQL](https://www.postgresql.org/)
@@ -18,7 +18,6 @@ classDiagram
     SQLClient --|> PostgresDB : connects to
 ```
 
-PythonClient: https://git.hte.group/hierndatabase/hiern-database-pgstack-pyclient
 
 As reverse proxy, caddy is recommended. To use it, create the following docker compose within the same or a separate stack:
 ```yml

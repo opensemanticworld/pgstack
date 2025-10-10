@@ -80,6 +80,8 @@ services:
 
   keycloak-db:
       image: postgres
+      profiles: 
+        - keycloak
       volumes:
         - ./keycloak/data/db:/var/lib/postgresql/data
       environment:
@@ -89,6 +91,8 @@ services:
 
   keycloak:
       image: quay.io/keycloak/keycloak
+      profiles: 
+        - keycloak
       command:
         - start
       environment:

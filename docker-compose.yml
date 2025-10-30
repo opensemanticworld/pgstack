@@ -74,6 +74,10 @@ services:
     environment:
       API_URL: ${PGRST_OPENAPI_SERVER_PROXY_URI}
       # VALIDATOR_URL: "localhost" # optional
+      PERSIST_AUTHORIZATION: ${SWAGGERUI_PERSIST_AUTHORIZATION} # default: false
+    configs:
+      - source: swagger-initializer.js
+        target: /usr/share/nginx/html/swagger-initializer.js
     restart: unless-stopped
     depends_on:
       - postgrest
@@ -138,3 +142,66 @@ configs:
         "PassFile": "/pgpass",
         "SSLMode": "prefer"
       }}}
+  swagger-initializer.js:
+    content: |
+      window.onload = function () {
+
+        var current_token = null;
+
+        function get_token() {
+          // warning! this thing is the path to the authorization value, it will change depending on your auth method
+          return window.ui.auth().getIn(['authorized', 'JWT', 'value']);
+        }
+
+        function reload_if_token_changed() {
+            setTimeout(function () {
+              var new_token = get_token()
+              if (new_token != current_token) {
+                current_token = new_token;
+                window.ui.getSystem().specActions.download();
+              }
+            });
+        }
+
+        document.addEventListener('click', function (evt) {
+          // the match is your buttons
+          if (evt.target && evt.target.matches('.auth.authorize.button')) {
+            reload_if_token_changed();
+          }
+        });
+        console.log("SWAGGERUI_PERSIST_AUTHORIZATION" + "${SWAGGERUI_PERSIST_AUTHORIZATION}");
+
+        //<editor-fold desc="Changeable Configuration Block">
+        // swagger will insert a window.ui = SwaggerUIBundle() here but we need to override it
+        //</editor-fold>
+        window.ui = SwaggerUIBundle({
+          "dom_id": "#swagger-ui",
+          deepLinking: true,
+          presets: [
+            SwaggerUIBundle.presets.apis,
+            SwaggerUIStandalonePreset
+          ],
+          plugins: [
+            SwaggerUIBundle.plugins.DownloadUrl
+          ],
+          layout: "StandaloneLayout",
+          queryConfigEnabled: false,
+          persistAuthorization: "${SWAGGERUI_PERSIST_AUTHORIZATION}" === "true",
+          url: "${PGRST_OPENAPI_SERVER_PROXY_URI}",
+          onComplete: function () {
+            // will be set if persistAuthorization is true
+            const config_str = localStorage.getItem("authorized");
+            const token = config_str ? JSON.parse(config_str).JWT?.value : null;
+            if (token) reload_if_token_changed();
+          },
+          requestInterceptor: function (e) {
+            if (current_token && !e.headers.Authorization) {
+              e.headers.Authorization = current_token;
+            }
+            return e;
+          },
+        });
+
+        //</editor-fold>
+      };
+      

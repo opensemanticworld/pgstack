@@ -47,7 +47,6 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
-GRANT EXECUTE ON FUNCTION api.create_tool(char) TO api_anon;
 GRANT EXECUTE ON FUNCTION api.create_tool(char) TO api_user;
 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
 
@@ -66,7 +65,6 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
-GRANT EXECUTE ON FUNCTION api.create_tools(char[]) TO api_anon;
 GRANT EXECUTE ON FUNCTION api.create_tools(char[]) TO api_user;
 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
 
@@ -98,7 +96,6 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
-GRANT EXECUTE ON FUNCTION api.delete_tool(char) TO api_anon;
 GRANT EXECUTE ON FUNCTION api.delete_tool(char) TO api_user;
 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
 
@@ -117,7 +114,6 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
-GRANT EXECUTE ON FUNCTION api.delete_tools(char[]) TO api_anon;
 GRANT EXECUTE ON FUNCTION api.delete_tools(char[]) TO api_user;
 
 -- New: Function to get tool configuration (available channels per tools)
@@ -153,10 +149,11 @@ BEGIN
 END;
 $$;
 
+GRANT EXECUTE ON FUNCTION api.get_tool_config() TO api_user;
+
 -- Create tools_view for public access
 DROP VIEW IF EXISTS api.tools_view;
 CREATE OR REPLACE VIEW api.tools_view AS
 SELECT * FROM api.tools;
-GRANT SELECT ON api.tools_view TO api_anon;
 -- GRANT ALL ON api.tools_view TO api_user;
 GRANT SELECT ON api.tools_view TO api_user;

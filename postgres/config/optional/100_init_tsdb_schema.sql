@@ -119,7 +119,6 @@ $$
 LANGUAGE plpgsql;
 GRANT EXECUTE ON FUNCTION api.delete_tools(char[]) TO api_anon;
 GRANT EXECUTE ON FUNCTION api.delete_tools(char[]) TO api_user;
-ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
 
 -- New: Function to get tool configuration (available channels per tools)
 DROP FUNCTION IF EXISTS api.get_tool_config();

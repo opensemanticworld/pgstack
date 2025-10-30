@@ -35,5 +35,3 @@ $$;
 CREATE EVENT TRIGGER pgrst_watch ON ddl_command_end
 EXECUTE PROCEDURE api.pgrst_watch();
 
--- Reset default privileges
-ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;

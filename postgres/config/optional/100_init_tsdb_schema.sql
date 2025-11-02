@@ -117,6 +117,7 @@ LANGUAGE plpgsql;
 GRANT EXECUTE ON FUNCTION api.delete_tools(char[]) TO api_user;
 
 -- New: Function to get tool configuration (available channels per tools)
+-- Note: This function is expensive for millions of rows per table
 DROP FUNCTION IF EXISTS api.get_tool_config();
 CREATE OR REPLACE FUNCTION api.get_tool_config()
   RETURNS JSONB
@@ -134,8 +135,7 @@ BEGIN
   LOOP
     -- Aggregate distinct channels into a JSON array, ordered alphabetically
     EXECUTE format(
-      'SELECT jsonb_agg(DISTINCT ch ORDER BY ch)
-         FROM api.%I',
+      'SELECT jsonb_agg(ch) FROM (SELECT DISTINCT ch FROM api.%I ORDER BY ch) AS temp',
       tbl_name
     ) INTO chs;
 

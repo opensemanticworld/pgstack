@@ -1,0 +1,16 @@
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+    volumes:
+      # Override bind mount with named volume (fixes Windows permission issues)
+      - pgdata:/home/postgres/pgdata/data
+      - ./postgres/config/optional/100_init_tsdb_schema.sql:/docker-entrypoint-initdb.d/100_init_tsdb_schema.sql
+      - ./postgres/config/optional/empty:/docker-entrypoint-initdb.d/010_install_timescaledb_toolkit.sh
+      - ./postgres/config/docker-entrypoint-initdb.d/010_init_postgrest.sql:/docker-entrypoint-initdb.d/010_init_postgrest.sql
+  postgrest:
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

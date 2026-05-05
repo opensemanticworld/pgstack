@@ -1,7 +1,7 @@
 SET search_path TO api;
 
 -- init extensions
-CREATE EXTENSION timescaledb;
+CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- ! ONLY IF ALL DATA OF ALL TOOLS SHOULD BE QUERYABLE 
 -- Internal (GET -> View, POST -> RPC)
@@ -23,7 +23,7 @@ CREATE OR REPLACE FUNCTION api.create_tool_endpoint(osw_tool CHAR(35)) RETURNS v
 $$
 BEGIN
     EXECUTE format('CREATE TABLE IF NOT EXISTS api.%I (ch CHAR(35), ts TIMESTAMPTZ NOT NULL, data JSONB)', osw_tool);
-    EXECUTE format('SELECT api.create_hypertable(''api.%I'', ''ts'')', osw_tool);
+    EXECUTE format('SELECT public.create_hypertable(''api.%I'', ''ts'')', osw_tool);
     -- EXECUTE format('GRANT SELECT on api.%I to api_anon', osw_tool);
     EXECUTE format('GRANT ALL on api.%I to api_user', osw_tool);
 END;
@@ -31,8 +31,8 @@ $$
 LANGUAGE plpgsql;
 GRANT EXECUTE ON FUNCTION api.create_tool_endpoint TO api_user;
 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
-GRANT EXECUTE ON FUNCTION api.create_hypertable (regclass, _timescaledb_internal.dimension_info, boolean , boolean, boolean) TO api_user;
-GRANT EXECUTE ON FUNCTION api.create_hypertable (regclass, name, name, integer, name, name, anyelement, boolean, boolean, regproc, boolean, text, regproc, regproc) TO api_user;
+GRANT EXECUTE ON FUNCTION public.create_hypertable (regclass, _timescaledb_internal.dimension_info, boolean , boolean, boolean) TO api_user;
+GRANT EXECUTE ON FUNCTION public.create_hypertable (regclass, name, name, integer, name, name, anyelement, boolean, boolean, regproc, boolean, text, regproc, regproc) TO api_user;
 GRANT EXECUTE ON FUNCTION _timescaledb_functions.insert_blocker() TO api_user;
 
 -- Function to create a tool, returns status message

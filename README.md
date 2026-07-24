@@ -166,6 +166,47 @@ docker compose up
 
 ## Maintenance
 
+### Applying schema / endpoint changes to a running stack
+
+The SQL under `postgres/config/*` (e.g. `postgres/config/optional/100_init_tsdb_schema.sql`,
+which defines the tool endpoints and the `api.downsample_tool_channel` RPC) is
+mounted into `/docker-entrypoint-initdb.d/`. The Postgres entrypoint runs those
+scripts **only when it initializes an empty data directory** (first start). On an
+already-initialized container it logs `... Skipping initialization` and never
+sources them, so:
+
+- `docker compose up` / `docker restart` does **not** re-run the init SQL.
+- Editing a mounted `.sql` file has **no effect** on the running DB.
+
+To pick up new or changed schema / endpoints without wiping data, apply the SQL
+manually and reload PostgREST's schema cache. The init SQL is written to be
+idempotent (`CREATE EXTENSION/TABLE IF NOT EXISTS`, and a `DROP ... IF EXISTS`
+before every `CREATE OR REPLACE` function / aggregate / view), so it is safe to
+re-run on a live database:
+
+```bash
+# 1. Apply the (idempotent) schema, incl. any new endpoints, to the live DB.
+#    Run as the superuser so object ownership and the GRANTs re-apply.
+docker exec -i postgres_container sh -c \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < postgres/config/optional/100_init_tsdb_schema.sql
+
+# 2. Make PostgREST expose the changes (reload its schema cache).
+docker exec -i postgres_container sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "NOTIFY pgrst, '\''reload schema'\'';"'
+#    alternative: docker restart postgrest_container
+```
+
+Verify a function is present in the exposed schema, e.g.:
+
+```bash
+docker exec postgres_container sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\df api.<function_name>"'
+```
+
+Until step 2 runs, PostgREST keeps returning "function not found" for a new RPC;
+clients that call it should fall back to a full-resolution read in the meantime.
+
 ### Reset
 
 ```bash

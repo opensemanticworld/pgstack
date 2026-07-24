@@ -31,9 +31,31 @@ $$
 LANGUAGE plpgsql;
 GRANT EXECUTE ON FUNCTION api.create_tool_endpoint TO api_user;
 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
-GRANT EXECUTE ON FUNCTION public.create_hypertable (regclass, _timescaledb_internal.dimension_info, boolean , boolean, boolean) TO api_user;
-GRANT EXECUTE ON FUNCTION public.create_hypertable (regclass, name, name, integer, name, name, anyelement, boolean, boolean, regproc, boolean, text, regproc, regproc) TO api_user;
-GRANT EXECUTE ON FUNCTION _timescaledb_functions.insert_blocker() TO api_user;
+-- The exact create_hypertable / insert_blocker signatures differ between
+-- TimescaleDB versions (e.g. the dimension_info overload only exists on 2.13+),
+-- so guard each grant: a missing overload on this TS version is skipped instead
+-- of aborting the script (keeps it re-runnable with ON_ERROR_STOP=1 on any TS).
+DO $grant$
+BEGIN
+    GRANT EXECUTE ON FUNCTION public.create_hypertable (regclass, _timescaledb_internal.dimension_info, boolean , boolean, boolean) TO api_user;
+EXCEPTION WHEN undefined_function OR undefined_object THEN
+    RAISE NOTICE 'create_hypertable(dimension_info) overload absent on this TimescaleDB; skipping grant';
+END
+$grant$;
+DO $grant$
+BEGIN
+    GRANT EXECUTE ON FUNCTION public.create_hypertable (regclass, name, name, integer, name, name, anyelement, boolean, boolean, regproc, boolean, text, regproc, regproc) TO api_user;
+EXCEPTION WHEN undefined_function OR undefined_object THEN
+    RAISE NOTICE 'classic create_hypertable overload absent on this TimescaleDB; skipping grant';
+END
+$grant$;
+DO $grant$
+BEGIN
+    GRANT EXECUTE ON FUNCTION _timescaledb_functions.insert_blocker() TO api_user;
+EXCEPTION WHEN undefined_function OR undefined_object OR invalid_schema_name THEN
+    RAISE NOTICE 'insert_blocker() absent on this TimescaleDB; skipping grant';
+END
+$grant$;
 
 -- Function to create a tool, returns status message
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;

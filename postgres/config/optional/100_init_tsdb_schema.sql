@@ -447,6 +447,20 @@ $func$;
 GRANT EXECUTE ON FUNCTION api.downsample_tool_channel(
     char, char, timestamptz, timestamptz, int, interval, text, boolean) TO api_user;
 
+-- downsample_tool_channel is SECURITY INVOKER, so its internal time_bucket()
+-- call runs as the caller (api_user). Some TimescaleDB builds do not grant
+-- time_bucket to PUBLIC (and 010_init_postgrest.sql revokes default PUBLIC
+-- execute), which otherwise yields "permission denied for function time_bucket".
+-- Grant the origin overload used by the RPC; guard it so a differing signature
+-- on another TimescaleDB version is skipped rather than aborting the script.
+DO $grant$
+BEGIN
+    GRANT EXECUTE ON FUNCTION time_bucket(interval, timestamptz, timestamptz) TO api_user;
+EXCEPTION WHEN undefined_function OR undefined_object THEN
+    RAISE NOTICE 'time_bucket(interval, timestamptz, timestamptz) overload absent; skipping grant';
+END
+$grant$;
+
 -- Support functions called within the RPC / deep-average aggregate.
 GRANT EXECUTE ON FUNCTION api._jsonb_tree_add(jsonb, jsonb) TO api_user;
 GRANT EXECUTE ON FUNCTION api._jsonb_tree_scale(jsonb, numeric) TO api_user;

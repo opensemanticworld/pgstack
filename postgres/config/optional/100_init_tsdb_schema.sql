@@ -24,6 +24,12 @@ $$
 BEGIN
     EXECUTE format('CREATE TABLE IF NOT EXISTS api.%I (ch CHAR(35), ts TIMESTAMPTZ NOT NULL, data JSONB)', osw_tool);
     EXECUTE format('SELECT public.create_hypertable(''api.%I'', ''ts'')', osw_tool);
+    -- create_hypertable only indexes ts. Nearly every read filters by channel
+    -- (ch = ... AND ts BETWEEN ...), so without a (ch, ts) index each query
+    -- scans every channel's rows in the window. This index also turns the
+    -- edge-anchor "DISTINCT ON (ch) ORDER BY ch, ts" lookups into index scans.
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON api.%I (ch, ts DESC)',
+                   osw_tool::text || '_ch_ts_idx', osw_tool);
     -- EXECUTE format('GRANT SELECT on api.%I to api_anon', osw_tool);
     EXECUTE format('GRANT ALL on api.%I to api_user', osw_tool);
 END;
@@ -31,6 +37,20 @@ $$
 LANGUAGE plpgsql;
 GRANT EXECUTE ON FUNCTION api.create_tool_endpoint TO api_user;
 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
+
+-- Backfill the (ch, ts) index for tool tables created before it was added.
+-- This script is re-runnable, so applying it to a live stack indexes existing
+-- tables; on a fresh initdb api.tools is empty and the loop is a no-op.
+DO $idx$
+DECLARE
+    t text;
+BEGIN
+    FOR t IN SELECT osw_tool::text FROM api.tools LOOP
+        EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON api.%I (ch, ts DESC)',
+                       t || '_ch_ts_idx', t);
+    END LOOP;
+END
+$idx$;
 -- The exact create_hypertable / insert_blocker signatures differ between
 -- TimescaleDB versions (e.g. the dimension_info overload only exists on 2.13+),
 -- so guard each grant: a missing overload on this TS version is skipped instead
@@ -397,17 +417,35 @@ BEGIN
             'FROM %s t WHERE t.ts BETWEEN %L AND %L%s GROUP BY %s, t.ch',
             bucket, b, tbl, ts_start, ts_end, ch_filter, bucket);
     ELSIF m IN ('minmax', 'min-max', 'min_max') THEN
+        -- Leaf extraction is done set-based with a recursive CTE over
+        -- jsonb_each instead of calling the recursive plpgsql helper
+        -- api._jsonb_numeric_leaves() once per row. Both handle arbitrary
+        -- nesting, but the per-row plpgsql call dominated the runtime of this
+        -- strategy; jsonb_each is a C-level SRF and the walk stays one set
+        -- operation. The final join back to src on (ts, ch) assumes that pair
+        -- identifies a row, which holds for these time series.
         core_sql := format(
-            'WITH leaves AS ('
-            '  SELECT %s AS tb, t.ts, t.ch, t.data, l.path, l.val '
-            '  FROM %s t CROSS JOIN LATERAL api._jsonb_numeric_leaves(t.data) l '
-            '  WHERE t.ts BETWEEN %L AND %L%s'
+            'WITH RECURSIVE src AS ('
+            '  SELECT %s AS tb, t.ts, t.ch, t.data '
+            '  FROM %s t WHERE t.ts BETWEEN %L AND %L%s'
+            '), walk AS ('
+            '  SELECT tb, ts, ch, data AS node, ARRAY[]::text[] AS path FROM src'
+            '  UNION ALL'
+            '  SELECT w.tb, w.ts, w.ch, kv.value, w.path || kv.key'
+            '  FROM walk w CROSS JOIN LATERAL jsonb_each(w.node) kv'
+            '  WHERE jsonb_typeof(w.node) = ''object'''
+            '), leaves AS ('
+            '  SELECT tb, ts, ch, path, (node #>> ''{}'')::numeric AS val'
+            '  FROM walk WHERE jsonb_typeof(node) = ''number'''
             '), ranked AS ('
-            '  SELECT ts, ch, data,'
+            '  SELECT ts, ch,'
             '    row_number() OVER (PARTITION BY tb, ch, path ORDER BY val ASC, ts ASC) AS rmin,'
             '    row_number() OVER (PARTITION BY tb, ch, path ORDER BY val DESC, ts ASC) AS rmax'
             '  FROM leaves'
-            ') SELECT DISTINCT ts, ch, data FROM ranked WHERE rmin = 1 OR rmax = 1',
+            ') SELECT DISTINCT ON (r.ts, r.ch) r.ts, r.ch, s.data'
+            '  FROM ranked r JOIN src s ON s.ts = r.ts AND s.ch = r.ch'
+            '  WHERE r.rmin = 1 OR r.rmax = 1'
+            '  ORDER BY r.ts, r.ch',
             bucket, tbl, ts_start, ts_end, ch_filter);
     ELSE  -- sample
         core_sql := format(
@@ -417,18 +455,23 @@ BEGIN
             bucket, tbl, ts_start, ts_end, ch_filter, bucket, bucket, b);
     END IF;
 
+    -- UNION ALL rather than UNION: the anchors add at most two rows per
+    -- channel, while UNION would dedup the whole result set including the
+    -- jsonb data column. The outer DISTINCT ON (ts, ch) removes the overlap
+    -- with the core result far more cheaply (scalar sort keys only).
     IF edge_anchors THEN
         anchor_sql := format(
-            ' UNION (SELECT DISTINCT ON (t.ch) t.ts, t.ch, t.data FROM %s t '
+            ' UNION ALL (SELECT DISTINCT ON (t.ch) t.ts, t.ch, t.data FROM %s t '
             'WHERE t.ts BETWEEN %L AND %L%s ORDER BY t.ch, t.ts ASC)'
-            ' UNION (SELECT DISTINCT ON (t.ch) t.ts, t.ch, t.data FROM %s t '
+            ' UNION ALL (SELECT DISTINCT ON (t.ch) t.ts, t.ch, t.data FROM %s t '
             'WHERE t.ts BETWEEN %L AND %L%s ORDER BY t.ch, t.ts DESC)',
             tbl, ts_start, ts_end, ch_filter, tbl, ts_start, ts_end, ch_filter);
     END IF;
 
     BEGIN
         RETURN QUERY EXECUTE format(
-            'SELECT ts, ch, data FROM ((%s)%s) u ORDER BY ts', core_sql, anchor_sql);
+            'SELECT DISTINCT ON (ts, ch) ts, ch, data FROM ((%s)%s) u ORDER BY ts, ch',
+            core_sql, anchor_sql);
     EXCEPTION WHEN OTHERS THEN
         -- Any unexpected structure (e.g. an array where a number was
         -- expected) degrades to the schema-agnostic sample strategy.
@@ -440,7 +483,8 @@ BEGIN
             'ORDER BY %s, t.ch, abs(extract(epoch FROM t.ts - (%s + %L::interval / 2)))',
             bucket, tbl, ts_start, ts_end, ch_filter, bucket, bucket, b);
         RETURN QUERY EXECUTE format(
-            'SELECT ts, ch, data FROM ((%s)%s) u ORDER BY ts', core_sql, anchor_sql);
+            'SELECT DISTINCT ON (ts, ch) ts, ch, data FROM ((%s)%s) u ORDER BY ts, ch',
+            core_sql, anchor_sql);
     END;
 END;
 $func$;
@@ -453,11 +497,29 @@ GRANT EXECUTE ON FUNCTION api.downsample_tool_channel(
 -- execute), which otherwise yields "permission denied for function time_bucket".
 -- Grant the origin overload used by the RPC; guard it so a differing signature
 -- on another TimescaleDB version is skipped rather than aborting the script.
+-- Granted by lookup rather than by literal signature: this script runs with
+-- search_path = api, and TimescaleDB may live in public (or another schema)
+-- with version-dependent overloads, so a hard-coded unqualified signature
+-- silently resolves to nothing. Grant every time_bucket overload that exists.
 DO $grant$
+DECLARE
+    fn record;
+    n   int := 0;
 BEGIN
-    GRANT EXECUTE ON FUNCTION time_bucket(interval, timestamptz, timestamptz) TO api_user;
-EXCEPTION WHEN undefined_function OR undefined_object THEN
-    RAISE NOTICE 'time_bucket(interval, timestamptz, timestamptz) overload absent; skipping grant';
+    FOR fn IN
+        SELECT p.oid::regprocedure AS sig
+        FROM pg_proc p
+        JOIN pg_namespace ns ON ns.oid = p.pronamespace
+        WHERE p.proname = 'time_bucket'
+    LOOP
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO api_user', fn.sig);
+        n := n + 1;
+    END LOOP;
+    IF n = 0 THEN
+        RAISE NOTICE 'no time_bucket function found; skipping grant';
+    ELSE
+        RAISE NOTICE 'granted execute on % time_bucket overload(s) to api_user', n;
+    END IF;
 END
 $grant$;
 

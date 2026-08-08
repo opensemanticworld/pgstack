@@ -164,6 +164,69 @@ sudo chown 1000:1000 ./postgres/data
 docker compose up
 ```
 
+## Server-side downsampling
+
+`api.downsample_tool_channel(osw_tool, ch_id, ts_start, ts_end, max_points,
+bin_size, method, edge_anchors)` buckets a tool channel with `time_bucket()` and
+reduces each bucket with one of three strategies:
+
+- `sample` (default): one real row nearest each bucket center, schema-agnostic.
+- `average`: structure-preserving deep average of the numeric JSONB leaves,
+  timestamped at the bucket center.
+- `minmax`: the real argmin/argmax row of every numeric leaf per bucket, so
+  spikes and the signal envelope survive. Returns up to two rows per bucket.
+
+`average` and `minmax` fall back to `sample` for channels without a numeric
+leaf. With `edge_anchors` the first and last returned rows are the window's
+first/last real datapoints.
+
+### Performance
+
+Measured with `benchmarks/bench_downsample.py` from
+[opensemantic.base-python](https://github.com/OpenSemanticWorld-Packages/opensemantic.base-python),
+100000 points per channel, `max_points=1000`, TimescaleDB 2.18.0 on pg16.6 in
+local Docker. `scalar` stores `{"value": n}`, `composite` a nested dict of two
+measurements.
+
+| channel   | method  |   rows |     ms |      KB | vs raw          |
+|-----------|---------|-------:|-------:|--------:|-----------------|
+| scalar    | raw     | 100000 |   1990 |   10731 | baseline        |
+| scalar    | sample  |   1002 |    166 |     107 | 12x / 100x less |
+| scalar    | average |   1003 |    992 |     113 | 2.0x / 95x less |
+| scalar    | minmax  |   2001 |   1275 |     215 | 1.6x / 50x less |
+| composite | raw     | 100000 |   3608 |   15506 | baseline        |
+| composite | sample  |   1002 |    181 |     155 | 20x / 100x less |
+| composite | average |   1003 |   2571 |     160 | 1.4x / 97x less |
+| composite | minmax  |   2001 |   2915 |     310 | 1.2x / 50x less |
+
+Reading this:
+
+- The payload shrinks by about 100x for every strategy, which is the point of
+  downsampling: a dashboard transfers ~100 KB instead of ~10 MB.
+- `sample` is by far the cheapest and is the right default for line plots.
+- `average` and `minmax` walk every numeric leaf of every row in the window, so
+  their cost scales with the raw row count, not with `max_points`. Choose them
+  when averaging or envelope preservation is actually needed.
+- Downsampling only pays off when it replaces reading the *whole* series. A
+  client that already caps its read (e.g. `limit=10000`) may find a capped
+  full-resolution read cheaper than `minmax` over a large window.
+- Cost is driven by the rows scanned in the window, so a narrow, realistic time
+  range matters more than a small `max_points`. Over a window far wider than the
+  stored data most buckets are empty and you get far fewer points than requested.
+
+Two schema details this depends on, both applied by
+`postgres/config/optional/100_init_tsdb_schema.sql`:
+
+- a `(ch, ts DESC)` index per tool table, so a channel-filtered read does not
+  scan every channel in the time range (the hypertable itself only indexes `ts`),
+- `GRANT EXECUTE` on `time_bucket` to `api_user`, since the RPC is SECURITY
+  INVOKER. Without it the RPC fails with `permission denied for function
+  time_bucket` and clients silently fall back to full-resolution reads.
+
+For very large ranges the structural fix is TimescaleDB continuous aggregates
+(pre-computed rollups maintained by background workers), which would make the
+cost proportional to the points returned rather than to the rows scanned.
+
 ## Maintenance
 
 ### Applying schema / endpoint changes to a running stack

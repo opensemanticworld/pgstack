@@ -419,33 +419,33 @@ BEGIN
     ELSIF m IN ('minmax', 'min-max', 'min_max') THEN
         -- Leaf extraction is done set-based with a recursive CTE over
         -- jsonb_each instead of calling the recursive plpgsql helper
-        -- api._jsonb_numeric_leaves() once per row. Both handle arbitrary
-        -- nesting, but the per-row plpgsql call dominated the runtime of this
-        -- strategy; jsonb_each is a C-level SRF and the walk stays one set
-        -- operation. The final join back to src on (ts, ch) assumes that pair
-        -- identifies a row, which holds for these time series.
+        -- api._jsonb_numeric_leaves() once per row; both handle arbitrary
+        -- nesting, but the per-row plpgsql call is markedly more expensive.
+        -- The original row is carried along the walk as `root` so the CTE is
+        -- referenced exactly once: an earlier variant selected the source rows
+        -- into their own CTE and joined back on (ts, ch), which forced that
+        -- CTE to be materialized and then hash-joined, and measured slower on
+        -- larger tables than the plpgsql version it replaced.
         core_sql := format(
-            'WITH RECURSIVE src AS ('
-            '  SELECT %s AS tb, t.ts, t.ch, t.data '
+            'WITH RECURSIVE walk AS ('
+            '  SELECT %s AS tb, t.ts, t.ch, t.data AS root, t.data AS node,'
+            '         ARRAY[]::text[] AS path'
             '  FROM %s t WHERE t.ts BETWEEN %L AND %L%s'
-            '), walk AS ('
-            '  SELECT tb, ts, ch, data AS node, ARRAY[]::text[] AS path FROM src'
             '  UNION ALL'
-            '  SELECT w.tb, w.ts, w.ch, kv.value, w.path || kv.key'
+            '  SELECT w.tb, w.ts, w.ch, w.root, kv.value, w.path || kv.key'
             '  FROM walk w CROSS JOIN LATERAL jsonb_each(w.node) kv'
             '  WHERE jsonb_typeof(w.node) = ''object'''
             '), leaves AS ('
-            '  SELECT tb, ts, ch, path, (node #>> ''{}'')::numeric AS val'
+            '  SELECT tb, ts, ch, root, path, (node #>> ''{}'')::numeric AS val'
             '  FROM walk WHERE jsonb_typeof(node) = ''number'''
             '), ranked AS ('
-            '  SELECT ts, ch,'
+            '  SELECT ts, ch, root,'
             '    row_number() OVER (PARTITION BY tb, ch, path ORDER BY val ASC, ts ASC) AS rmin,'
             '    row_number() OVER (PARTITION BY tb, ch, path ORDER BY val DESC, ts ASC) AS rmax'
             '  FROM leaves'
-            ') SELECT DISTINCT ON (r.ts, r.ch) r.ts, r.ch, s.data'
-            '  FROM ranked r JOIN src s ON s.ts = r.ts AND s.ch = r.ch'
-            '  WHERE r.rmin = 1 OR r.rmax = 1'
-            '  ORDER BY r.ts, r.ch',
+            ') SELECT DISTINCT ON (ts, ch) ts, ch, root AS data'
+            '  FROM ranked WHERE rmin = 1 OR rmax = 1'
+            '  ORDER BY ts, ch',
             bucket, tbl, ts_start, ts_end, ch_filter);
     ELSE  -- sample
         core_sql := format(

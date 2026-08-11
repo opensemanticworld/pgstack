@@ -182,50 +182,64 @@ first/last real datapoints.
 
 ### Performance
 
-Measured with `benchmarks/bench_downsample.py` from
+The dataset-independent benefit is the **payload reduction**. Absolute query
+times are planner- and hardware-dependent: the same query varies 2-3x (and
+`minmax` more) across PostgreSQL versions, `work_mem` and available parallel
+workers, so treat any millisecond figure as indicative and measure on your own
+database. Payload measured with `benchmarks/bench_downsample.py` from
 [opensemantic.base-python](https://github.com/OpenSemanticWorld-Packages/opensemantic.base-python),
-100000 points per channel, `max_points=1000`, TimescaleDB 2.18.0 on pg16.6 in
-local Docker. `scalar` stores `{"value": n}`, `composite` a nested dict of two
-measurements.
+100000 points per channel, `max_points=1000`. `scalar` stores `{"value": n}`,
+`composite` a nested dict of two measurements.
 
-| channel   | method  |   rows |     ms |      KB | vs raw          |
-|-----------|---------|-------:|-------:|--------:|-----------------|
-| scalar    | raw     | 100000 |   1990 |   10731 | baseline        |
-| scalar    | sample  |   1002 |    166 |     107 | 12x / 100x less |
-| scalar    | average |   1003 |    992 |     113 | 2.0x / 95x less |
-| scalar    | minmax  |   2001 |   1275 |     215 | 1.6x / 50x less |
-| composite | raw     | 100000 |   3608 |   15506 | baseline        |
-| composite | sample  |   1002 |    181 |     155 | 20x / 100x less |
-| composite | average |   1003 |   2571 |     160 | 1.4x / 97x less |
-| composite | minmax  |   2001 |   2915 |     310 | 1.2x / 50x less |
+| channel   | method  | rows returned | payload | vs raw     |
+|-----------|---------|--------------:|--------:|------------|
+| scalar    | raw     |        100000 | 10.7 MB | baseline   |
+| scalar    | sample  |          1002 |  107 KB | ~100x less |
+| scalar    | average |          1003 |  113 KB | ~95x less  |
+| scalar    | minmax  |          2001 |  215 KB | ~50x less  |
+| composite | raw     |        100000 | 15.5 MB | baseline   |
+| composite | sample  |          1002 |  155 KB | ~100x less |
+| composite | average |          1003 |  160 KB | ~97x less  |
+| composite | minmax  |          2001 |  310 KB | ~50x less  |
 
 Reading this:
 
-- The payload shrinks by about 100x for every strategy, which is the point of
-  downsampling: a dashboard transfers ~100 KB instead of ~10 MB.
-- `sample` is by far the cheapest and is the right default for line plots.
-- `average` and `minmax` walk every numeric leaf of every row in the window, so
-  their cost scales with the raw row count, not with `max_points`. Choose them
-  when averaging or envelope preservation is actually needed.
+- Every strategy shrinks the payload ~50-100x, which is the point of
+  downsampling: a dashboard transfers ~0.1 MB instead of ~10-15 MB.
+- `sample` is the cheapest by far and is the right default for line plots.
+  `average` and `minmax` walk every numeric leaf of every row in the window, so
+  their cost scales with the rows scanned, not with `max_points`; `minmax`
+  (argmin/argmax of each leaf per bucket) is the most expensive.
 - Downsampling only pays off when it replaces reading the *whole* series. A
   client that already caps its read (e.g. `limit=10000`) may find a capped
   full-resolution read cheaper than `minmax` over a large window.
-- Cost is driven by the rows scanned in the window, so a narrow, realistic time
-  range matters more than a small `max_points`. Over a window far wider than the
-  stored data most buckets are empty and you get far fewer points than requested.
+- Cost tracks the rows scanned, so a narrow, realistic time range matters more
+  than a small `max_points`. Over a window far wider than the stored data most
+  buckets are empty and you get far fewer points than requested.
 
-Two schema details this depends on, both applied by
+Schema details this relies on, all in
 `postgres/config/optional/100_init_tsdb_schema.sql`:
 
 - a `(ch, ts DESC)` index per tool table, so a channel-filtered read does not
-  scan every channel in the time range (the hypertable itself only indexes `ts`),
+  scan every channel in the time range (the hypertable itself only indexes `ts`);
 - `GRANT EXECUTE` on `time_bucket` to `api_user`, since the RPC is SECURITY
   INVOKER. Without it the RPC fails with `permission denied for function
-  time_bucket` and clients silently fall back to full-resolution reads.
+  time_bucket` and clients silently fall back to full-resolution reads;
+- a `ROWS 1` estimate on `api._jsonb_numeric_leaves`. A set-returning plpgsql
+  function defaults to an estimate of 1000 rows per call, so in the `minmax`
+  LATERAL join the planner expected ~1000x the real leaf count and chose a
+  serial big-sort. `ROWS 1` matches scalar data (one leaf per row) and lets it
+  pick the parallel plan; it helps up to a few numeric leaves per row and mildly
+  regresses past ~10, so raise it for genuinely many-leaf channels.
 
-For very large ranges the structural fix is TimescaleDB continuous aggregates
-(pre-computed rollups maintained by background workers), which would make the
-cost proportional to the points returned rather than to the rows scanned.
+Tuning `minmax`: its windowing plans either as a parallel scan+sort or a single
+serial big-sort, and which the planner picks is sensitive to the `ROWS` estimate
+above, to `work_mem` (a *larger* `work_mem` can disable the parallel plan and
+make it slower), and to `max_parallel_workers_per_gather`. If `minmax` is slow,
+`EXPLAIN ANALYZE` it and check whether it ran parallel. For very large ranges the
+structural fix is TimescaleDB continuous aggregates (pre-computed rollups
+maintained by background workers), which make the cost proportional to the
+points returned rather than to the rows scanned.
 
 ## Maintenance
 

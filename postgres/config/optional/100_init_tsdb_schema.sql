@@ -224,12 +224,20 @@ GRANT SELECT ON api.tools_view TO api_user;
 -- sql functions and would try to inline a self-recursive one without bound
 -- (stack depth limit exceeded). plpgsql is not inlined, so recursion runs
 -- normally at execution time.
+--
+-- ROWS 1: a set-returning plpgsql function defaults to an estimate of 1000
+-- rows per call. In the minmax LATERAL join that made the planner expect
+-- ~1000x the real leaf count (e.g. 104M instead of 104k), which pushed it
+-- onto a serial big-sort plan. A realistic estimate (~1 leaf for a scalar
+-- channel, a handful for a nested one) keeps the cheaper parallel plan and
+-- measured ~2.5x faster on a 104k row channel (1.3s -> 0.5s). Raise it if a
+-- channel routinely stores many numeric leaves.
 CREATE OR REPLACE FUNCTION api._jsonb_numeric_leaves(
     data jsonb,
     prefix text[] DEFAULT ARRAY[]::text[]
 )
 RETURNS TABLE(path text[], val numeric)
-LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE ROWS 1 AS $$
 DECLARE
     k text;
     v jsonb;
@@ -417,33 +425,25 @@ BEGIN
             'FROM %s t WHERE t.ts BETWEEN %L AND %L%s GROUP BY %s, t.ch',
             bucket, b, tbl, ts_start, ts_end, ch_filter, bucket);
     ELSIF m IN ('minmax', 'min-max', 'min_max') THEN
-        -- Leaf extraction is done set-based with a recursive CTE over
-        -- jsonb_each instead of calling the recursive plpgsql helper
-        -- api._jsonb_numeric_leaves() once per row; both handle arbitrary
-        -- nesting, but the per-row plpgsql call is markedly more expensive.
-        -- The original row is carried along the walk as `root` so the CTE is
-        -- referenced exactly once: an earlier variant selected the source rows
-        -- into their own CTE and joined back on (ts, ch), which forced that
-        -- CTE to be materialized and then hash-joined, and measured slower on
-        -- larger tables than the plpgsql version it replaced.
+        -- Leaf extraction stays on the recursive plpgsql helper
+        -- api._jsonb_numeric_leaves(). Replacing it with a set-based recursive
+        -- CTE over jsonb_each was measured faster on a small local stack but
+        -- clearly slower where it matters: on a 104k row table it took 3.9-4.1s
+        -- versus 2.7s for this helper, in both the join-back and the
+        -- carry-the-row variant. The recursive CTE machinery, not the per-row
+        -- call, dominates there. Re-measure on a production-sized table before
+        -- attempting that rewrite again.
         core_sql := format(
-            'WITH RECURSIVE walk AS ('
-            '  SELECT %s AS tb, t.ts, t.ch, t.data AS root, t.data AS node,'
-            '         ARRAY[]::text[] AS path'
-            '  FROM %s t WHERE t.ts BETWEEN %L AND %L%s'
-            '  UNION ALL'
-            '  SELECT w.tb, w.ts, w.ch, w.root, kv.value, w.path || kv.key'
-            '  FROM walk w CROSS JOIN LATERAL jsonb_each(w.node) kv'
-            '  WHERE jsonb_typeof(w.node) = ''object'''
-            '), leaves AS ('
-            '  SELECT tb, ts, ch, root, path, (node #>> ''{}'')::numeric AS val'
-            '  FROM walk WHERE jsonb_typeof(node) = ''number'''
+            'WITH leaves AS ('
+            '  SELECT %s AS tb, t.ts, t.ch, t.data, l.path, l.val '
+            '  FROM %s t CROSS JOIN LATERAL api._jsonb_numeric_leaves(t.data) l '
+            '  WHERE t.ts BETWEEN %L AND %L%s'
             '), ranked AS ('
-            '  SELECT ts, ch, root,'
+            '  SELECT ts, ch, data,'
             '    row_number() OVER (PARTITION BY tb, ch, path ORDER BY val ASC, ts ASC) AS rmin,'
             '    row_number() OVER (PARTITION BY tb, ch, path ORDER BY val DESC, ts ASC) AS rmax'
             '  FROM leaves'
-            ') SELECT DISTINCT ON (ts, ch) ts, ch, root AS data'
+            ') SELECT DISTINCT ON (ts, ch) ts, ch, data'
             '  FROM ranked WHERE rmin = 1 OR rmax = 1'
             '  ORDER BY ts, ch',
             bucket, tbl, ts_start, ts_end, ch_filter);

@@ -284,6 +284,100 @@ docker exec postgres_container sh -c \
 Until step 2 runs, PostgREST keeps returning "function not found" for a new RPC;
 clients that call it should fall back to a full-resolution read in the meantime.
 
+### Schema normalization (migration 001)
+
+Up to and including commit `3166ac8`, `100_init_tsdb_schema.sql` ran
+`SET search_path TO api` before `CREATE EXTENSION timescaledb`. An extension
+created without a `SCHEMA` clause lands in the first schema of `search_path`, so
+wherever the extension had not already been created, it was created inside the
+PostgREST-exposed `api` schema. Symptoms:
+
+- `create_tool` fails with
+  `function public.create_hypertable(unknown, unknown) does not exist`
+- the TimescaleDB functions sit in the exposed schema, where PostgREST turns
+  those a role may execute into `/rpc` endpoints
+
+**Affected:** databases initialized from `dcc8198` (2025-10-10, the first
+version of the file) through `3166ac8` (2026-08-11), *and* on a stack where the
+extension was not already created before that script ran. Fixed in `9271766`,
+which creates the extension with an explicit `SCHEMA public` and refuses to
+initialize a drifted database.
+
+Whether the extension already exists is not decided by the image alone. The
+`timescale/timescaledb-ha` image ships
+`/docker-entrypoint-initdb.d/000_install_timescaledb.sh`, which runs
+`CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE` with the default
+`search_path` and sorts before the mounted `100_init_tsdb_schema.sql`. On such a
+stack the extension is already in `public` and the `CREATE EXTENSION` in the
+init script is a no-op.
+
+A deployment that shadows that installer, a common workaround for
+`extension "timescaledb" has already been loaded with another version`:
+
+```yaml
+- ./postgres/config/optional/empty:/docker-entrypoint-initdb.d/000_install_timescaledb.sh
+```
+
+removes that step, so `100_init_tsdb_schema.sql` becomes the first creator of
+the extension and it lands in whichever schema `search_path` names first.
+
+`docker-compose.example-tsdb.override.yml` in this repository does not shadow
+that installer, it only skips the toolkit; the deployed test and production
+overrides do shadow it. Two stacks on the same image and the same commit
+therefore ended up different, and the drift never showed locally. Deployment
+overrides are not part of this repository, so check the running stack rather
+than the example: which compose files were used, and whether the installer is
+disabled:
+
+```bash
+docker inspect postgres_container   --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+docker exec postgres_container   sh -c 'wc -c < /docker-entrypoint-initdb.d/000_install_timescaledb.sh'
+docker exec -i postgres_container   sh -c 'psql -U "$POSTGRES_USER" -d template1 -c "\dx timescaledb"'
+```
+
+A size of `0` means the installer is shadowed by `empty`. If `template1` lists
+the extension, every new database inherits it in `public`.
+
+Both the image and those shadowing mounts come from the override files passed to
+compose, not from `docker-compose.yml` alone:
+
+```bash
+docker compose   -f docker-compose.yml   -f docker-compose.example-tsdb.override.yml   -f docker-compose.test.override.yml up
+```
+
+Since this depends on how a stack was deployed rather than on the commit alone,
+let the preflight decide. It is read-only:
+
+```bash
+docker exec -i postgres_container sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'   < postgres/migrations/000_preflight_check.sql
+```
+
+`timescaledb schema = api` means drifted, `public` means there is nothing to do.
+To normalize (catalog-only, no data is copied, but take a backup first):
+
+```bash
+docker stop postgrest_container
+
+docker exec -i postgres_container sh -c   'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'   < postgres/migrations/001_normalize_timescaledb_schema.sql
+
+docker exec -i postgres_container sh -c   'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'   < postgres/config/optional/100_init_tsdb_schema.sql
+
+docker start postgrest_container
+```
+
+Re-run the preflight afterwards: the extension must be in `public`, the exposed
+schema must contain no extension functions and the hypertable count must be
+unchanged.
+
+Validate the endpoints end to end. The script creates a tool, writes a row to
+its table endpoint, reads it back and deletes the tool again; because it writes
+immediately after the create, it also proves the schema cache reload works:
+
+```bash
+scripts/validate_api.sh                                 # local stack
+scripts/validate_api.sh https://db.test.terravac.cloud  # remote
+```
+
 ### Reset
 
 ```bash
@@ -293,14 +387,93 @@ sudo rm -R postgres/data/*
 
 ### Backup
 
+Take a full dump in the custom format. It is compressed (about the same size as
+plain SQL piped through gzip, since the format uses zlib itself), and unlike a
+compressed SQL stream it can be listed without restoring, restored in parallel
+with `pg_restore -j`, and restored selectively with `-t` / `-n`.
+
+Do not redirect stderr to `/dev/null`: a dump that fails or truncates half way
+still leaves a plausible looking file, so the warnings and errors are the only
+signal that it did not complete.
+
 ```bash
-cd <path-to-tsdb-docker-compose-filder>
-mkdir backup
-docker compose exec postgres /bin/bash -c 'pg_dump -U postgres -F p postgres 2>/dev/null | gzip | base64 -w 0' | base64 -d > backup/backup_$(date +"%Y%m%d_%H%M%S").sql.gz
+cd <path-to-tsdb-docker-compose-folder>
+mkdir -p backup
+docker exec postgres_container sh -c   'pg_dump -U "$POSTGRES_USER" -Fc -d "$POSTGRES_DB"'   > backup/backup_$(date +"%Y%m%d_%H%M%S").dump
+```
+
+`pg_dump` prints, for `hypertable`, `chunk` and `continuous_agg`:
+
+```
+warning: there are circular foreign-key constraints on this table
+hint: ... Consider using a full dump instead of a --data-only dump ...
+```
+
+Those are TimescaleDB's own catalog tables, which reference each other; the
+warning appears on every TimescaleDB dump and the dump is still complete. The
+hint does not apply to the command above, which already is a full dump.
+
+The dump is written on the host, not inside the container, so verify it by
+piping it back in via stdin (a few hundred TOC entries is normal):
+
+```bash
+docker exec -i postgres_container pg_restore --list < backup/backup_<date>.dump | wc -l
+```
+
+Always take a backup before applying anything under `postgres/migrations/`.
+
+For a dump that can be read without restoring it, for example to grep the DDL,
+use plain SQL instead. It restores by piping into `psql` rather than
+`pg_restore`, still wrapped in the two TimescaleDB calls shown below:
+
+```bash
+docker exec postgres_container sh -c   'pg_dump -U "$POSTGRES_USER" -F p -d "$POSTGRES_DB" | gzip'   > backup/backup_$(date +"%Y%m%d_%H%M%S").sql.gz
+
+zcat backup/backup_<date>.sql.gz | less
 ```
 
 ### Restore
+
+A plain `pg_restore` is **not** sufficient for TimescaleDB: its catalog and the
+chunk triggers have to be put into restore mode first, otherwise the restore
+fails or leaves the hypertables inconsistent. Wrap it in
+`timescaledb_pre_restore()` / `timescaledb_post_restore()`. The target database
+must already have the **same TimescaleDB version** as the source.
+
 ```bash
-cd <path-to-tsdb-docker-compose-filder>
-zcat backup/db_backup_<date>.sql.gz | docker exec -i <container_name> psql -U postgres -d postgres
+cd <path-to-tsdb-docker-compose-folder>
+
+docker exec -i postgres_container sh -c   'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT timescaledb_pre_restore();"'
+
+docker exec -i postgres_container sh -c   'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < backup/backup_<date>.dump
+
+docker exec -i postgres_container sh -c   'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT timescaledb_post_restore();"'
 ```
+
+Verify the restored database: the hypertables, their chunks and new writes.
+
+```bash
+docker exec postgres_container sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c   "SELECT hypertable_schema, hypertable_name FROM timescaledb_information.hypertables;"'
+docker exec postgres_container sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c   "SELECT hypertable_name, count(*) FROM timescaledb_information.chunks GROUP BY 1;"'
+```
+
+Inserting a row with a timestamp outside the existing range must create a new
+chunk; if it does, the hypertable machinery survived the restore intact.
+
+A plain SQL dump is restored the same way, piped into `psql` instead of
+`pg_restore` and wrapped in the same two calls:
+
+```bash
+docker exec -i postgres_container sh -c   'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT timescaledb_pre_restore();"'
+
+zcat backup/backup_<date>.sql.gz | docker exec -i postgres_container sh -c   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+
+docker exec -i postgres_container sh -c   'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT timescaledb_post_restore();"'
+```
+
+A dump records the schema the extension lived in when it was taken, as
+`CREATE EXTENSION IF NOT EXISTS timescaledb WITH SCHEMA ...`. A backup taken
+before the normalization below therefore carries `WITH SCHEMA api`: restoring it
+into an empty database recreates the drift and migration 001 has to be run
+again. Restoring it into a database that already has the extension in `public`
+is unaffected, because the statement is then a no-op.

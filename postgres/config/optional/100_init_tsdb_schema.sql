@@ -1,7 +1,35 @@
-SET search_path TO api;
-
 -- init extensions
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- Install TimescaleDB explicitly into public, never into the PostgREST-exposed
+-- api schema. An extension without a SCHEMA clause lands in the first schema of
+-- search_path, so creating it after "SET search_path TO api" put TimescaleDB
+-- into api on stacks whose image does not preinstall it. Images that ship it in
+-- template1 (e.g. timescaledb-ha) kept it in public, which masked the drift.
+-- In the exposed schema its functions become PostgREST /rpc endpoints;
+-- PostgREST expects extensions on db-extra-search-path (default: public).
+CREATE EXTENSION IF NOT EXISTS timescaledb SCHEMA public;
+
+-- Fail fast rather than adapt. Resolving the extension schema dynamically would
+-- keep a drifted stack working and hide the fact that its API exposes the
+-- TimescaleDB functions, so refuse to initialize until it is normalized.
+DO $check$
+DECLARE
+    ts_schema text;
+BEGIN
+    SELECT n.nspname INTO ts_schema
+    FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'timescaledb';
+    IF ts_schema IS DISTINCT FROM 'public' THEN
+        RAISE EXCEPTION
+            'TimescaleDB is installed in schema % instead of public. Its '
+            'functions are exposed as PostgREST endpoints there and the '
+            'public.* calls in this script cannot resolve. Normalize the '
+            'database first (move the API objects out of the extension '
+            'schema); see postgres/migrations/.', ts_schema;
+    END IF;
+END
+$check$;
+
+SET search_path TO api;
 
 -- ! ONLY IF ALL DATA OF ALL TOOLS SHOULD BE QUERYABLE 
 -- Internal (GET -> View, POST -> RPC)
@@ -23,7 +51,11 @@ CREATE OR REPLACE FUNCTION api.create_tool_endpoint(osw_tool CHAR(35)) RETURNS v
 $$
 BEGIN
     EXECUTE format('CREATE TABLE IF NOT EXISTS api.%I (ch CHAR(35), ts TIMESTAMPTZ NOT NULL, data JSONB)', osw_tool);
-    EXECUTE format('SELECT public.create_hypertable(''api.%I'', ''ts'')', osw_tool);
+    -- if_not_exists keeps create_tool retryable; the explicit casts select the
+    -- (regclass, name) overload unambiguously across TimescaleDB versions.
+    EXECUTE format(
+        'SELECT public.create_hypertable(%L::regclass, %L::name, if_not_exists => TRUE)',
+        format('api.%I', osw_tool), 'ts');
     -- create_hypertable only indexes ts. Nearly every read filters by channel
     -- (ch = ... AND ts BETWEEN ...), so without a (ch, ts) index each query
     -- scans every channel's rows in the window. This index also turns the
@@ -497,10 +529,10 @@ GRANT EXECUTE ON FUNCTION api.downsample_tool_channel(
 -- execute), which otherwise yields "permission denied for function time_bucket".
 -- Grant the origin overload used by the RPC; guard it so a differing signature
 -- on another TimescaleDB version is skipped rather than aborting the script.
--- Granted by lookup rather than by literal signature: this script runs with
--- search_path = api, and TimescaleDB may live in public (or another schema)
--- with version-dependent overloads, so a hard-coded unqualified signature
--- silently resolves to nothing. Grant every time_bucket overload that exists.
+-- Granted by lookup rather than by literal signature: the overload set is
+-- version dependent and this script runs with search_path = api, so a
+-- hard-coded unqualified signature silently resolves to nothing. The lookup is
+-- pinned to public so it cannot mask a TimescaleDB installed elsewhere.
 DO $grant$
 DECLARE
     fn record;
@@ -511,6 +543,7 @@ BEGIN
         FROM pg_proc p
         JOIN pg_namespace ns ON ns.oid = p.pronamespace
         WHERE p.proname = 'time_bucket'
+          AND ns.nspname = 'public'
     LOOP
         EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO api_user', fn.sig);
         n := n + 1;

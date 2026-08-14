@@ -11,4 +11,13 @@ services:
       - ./postgres/config/optional/100_init_tsdb_schema.sql:/docker-entrypoint-initdb.d/100_init_tsdb_schema.sql
       # skip the timescaledb toolkit installation - Fixes ERROR:  extension "timescaledb_toolkit" is not available
       - ./postgres/config/optional/empty:/docker-entrypoint-initdb.d/010_install_timescaledb_toolkit.sh
+      # Some environments must additionally shadow the image's own extension
+      # installer, which otherwise fails with: extension "timescaledb" has
+      # already been loaded with another version
+      #   - ./postgres/config/optional/empty:/docker-entrypoint-initdb.d/000_install_timescaledb.sh
+      # That is safe: 100_init_tsdb_schema.sql creates the extension itself with
+      # an explicit SCHEMA public, so the result is the same whether or not the
+      # image already created it. Without that pin the extension would follow
+      # search_path into the PostgREST-exposed api schema (see README, schema
+      # normalization), so do not drop the pin to "simplify" the init script.
 
